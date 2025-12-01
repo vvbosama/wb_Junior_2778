@@ -72,7 +72,7 @@ void free_page(void *page)
     kmem.freelist = r;
 }
 
-/* 可选：连续多页分配（最简单版：n==1 时等价 alloc_page；n>1 暂不实现） */
+/* 连续多页分配（最简单版：n==1 时等价 alloc_page；n>1 暂不实现） */
 void *alloc_pages(int n)
 {
     if (n <= 1)

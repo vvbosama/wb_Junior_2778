@@ -7,7 +7,7 @@ void kernel_main(void)
     uart_init();
     uart_puts("Hello OS\n");
 
-    /* 验证 BSS（如需） */
+    /* 验证 BSS */
     static int check_bss;
     if (check_bss != 0)
     {
