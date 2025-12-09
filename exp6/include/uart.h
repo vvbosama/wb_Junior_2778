@@ -1,34 +1,36 @@
-// include/uart.h (更新)
-#ifndef _UART_H_
-#define _UART_H_
+#pragma once
 
-// UART 寄存器偏移
-#define UART_RHR 0    // 接收保持寄存器
-#define UART_THR 0    // 发送保持寄存器  
-#define UART_IER 1    // 中断使能寄存器
-#define UART_IIR 2    // 中断标识寄存器
-#define UART_FCR 2    // FIFO控制寄存器
-#define UART_LCR 3    // 线路控制寄存器
-#define UART_LSR 5    // 线路状态寄存器
+#include <stdint.h>
 
-// 线路状态寄存器位
-#define LSR_RX_READY (1 << 0)   // 数据就绪
-#define LSR_TX_IDLE  (1 << 5)   // 发送器空闲
+/* 16550 UART 基地址与寄存器偏移（QEMU virt 平台） */
+#define UART0_BASE     0x10000000UL
 
-// 中断使能寄存器位
-#define IER_RX_ENABLE (1 << 0)  // 接收中断使能
+/* 寄存器偏移（当 LCR.DLAB=0） */
+#define UART_RBR_THR   0x00  /* 读: RBR，写: THR */
+#define UART_IER       0x01  /* Interrupt Enable */
+#define UART_IIR_FCR   0x02  /* 读: IIR，写: FCR */
+#define UART_LCR       0x03  /* Line Control */
+#define UART_MCR       0x04  /* Modem Control */
+#define UART_LSR       0x05  /* Line Status */
+#define UART_MSR       0x06  /* Modem Status */
+#define UART_SCR       0x07  /* Scratch */
 
-// UART 函数声明
+/* 当 LCR.DLAB=1 时：DLL/DLM */
+#define UART_DLL       0x00
+#define UART_DLM       0x01
+
+/* LSR 位定义 */
+#define LSR_THRE       (1 << 5)  /* Transmitter Holding Register Empty */
+#define LSR_DR         (1 << 0)  /* Data Ready */
+
+/* 基本输出接口 */
 void uart_init(void);
 void uart_putc(char c);
-void uart_puts(char *s);
-int uart_input_available(void);
-char uart_getc(void);
+void uart_puts(const char *s);
+int  uart_getc(void);           /* 阻塞读取一个字符 */
+int  uart_getc_nonblock(void);  /* 无数据返回 -1 */
 
-// 新增中断相关函数
-void uart_enable_rx_interrupt(void);
-void uart_disable_interrupts(void);
-int uart_check_interrupt(void);
-void uart_interrupt_handler(void);
 
-#endif
+
+
+

@@ -1,80 +1,100 @@
-// kernel/trap.h
-#ifndef _TRAP_H_
-#define _TRAP_H_
+#pragma once
 
-#include "types.h"
+#include "riscv.h"
 
-// 中断原因
-#define CAUSE_MISALIGNED_FETCH    0x0
-#define CAUSE_FETCH_ACCESS        0x1
-#define CAUSE_ILLEGAL_INSTRUCTION 0x2
-#define CAUSE_BREAKPOINT          0x3
-#define CAUSE_MISALIGNED_LOAD     0x4
-#define CAUSE_LOAD_ACCESS         0x5
-#define CAUSE_MISALIGNED_STORE    0x6
-#define CAUSE_STORE_ACCESS        0x7
-#define CAUSE_USER_ECALL          0x8
-#define CAUSE_SUPERVISOR_ECALL    0x9
-#define CAUSE_MACHINE_ECALL       0xb
-#define CAUSE_FETCH_PAGE_FAULT    0xc
-#define CAUSE_LOAD_PAGE_FAULT     0xd
-#define CAUSE_STORE_PAGE_FAULT    0xf
+typedef void (*interrupt_handler_t)(void);
 
-// 中断类型
-#define IRQ_S_SOFT    1
-#define IRQ_H_SOFT    2
-#define IRQ_M_SOFT    3
-#define IRQ_S_TIMER   5
-#define IRQ_H_TIMER   6
-#define IRQ_M_TIMER   7
-#define IRQ_S_EXT     9
-#define IRQ_H_EXT     10
-#define IRQ_M_EXT     11
-
-// 陷阱上下文结构
-struct trap_context {
-    uint64_t ra;
-    uint64_t sp;
-    uint64_t gp;
-    uint64_t tp;
-    uint64_t t0;
-    uint64_t t1;
-    uint64_t t2;
-    uint64_t s0;
-    uint64_t s1;
-    uint64_t a0;
-    uint64_t a1;
-    uint64_t a2;
-    uint64_t a3;
-    uint64_t a4;
-    uint64_t a5;
-    uint64_t a6;
-    uint64_t a7;
-    uint64_t s2;
-    uint64_t s3;
-    uint64_t s4;
-    uint64_t s5;
-    uint64_t s6;
-    uint64_t s7;
-    uint64_t s8;
-    uint64_t s9;
-    uint64_t s10;
-    uint64_t s11;
-    uint64_t t3;
-    uint64_t t4;
-    uint64_t t5;
-    uint64_t t6;
-    
-    // 特殊寄存器
-    uint64_t mepc;
-    uint64_t mstatus;
-    uint64_t mtval;
+enum {
+  IRQ_S_SOFT = 1,
+  IRQ_S_TIMER = 5,
+  IRQ_S_EXTERNAL = 9,
+  IRQ_MAX = 32
 };
 
-// 函数声明
-void trap_init(void);
-void trap_handler(struct trap_context *ctx);
-void enable_interrupts(void);
-void disable_interrupts(void);
+struct pushregs {
+  uint64 ra;
+  uint64 gp;
+  uint64 tp;
+  uint64 t0;
+  uint64 t1;
+  uint64 t2;
+  uint64 s0;
+  uint64 s1;
+  uint64 a0;
+  uint64 a1;
+  uint64 a2;
+  uint64 a3;
+  uint64 a4;
+  uint64 a5;
+  uint64 a6;
+  uint64 a7;
+  uint64 s2;
+  uint64 s3;
+  uint64 s4;
+  uint64 s5;
+  uint64 s6;
+  uint64 s7;
+  uint64 s8;
+  uint64 s9;
+  uint64 s10;
+  uint64 s11;
+  uint64 t3;
+  uint64 t4;
+  uint64 t5;
+  uint64 t6;
+};
 
-#endif
+struct trapframe {
+  uint64 kernel_satp;
+  uint64 kernel_sp;
+  uint64 kernel_trap;
+  uint64 kernel_hartid;
+  uint64 epc;
+  uint64 ra;
+  uint64 sp;
+  uint64 gp;
+  uint64 tp;
+  uint64 t0;
+  uint64 t1;
+  uint64 t2;
+  uint64 s0;
+  uint64 s1;
+  uint64 a0;
+  uint64 a1;
+  uint64 a2;
+  uint64 a3;
+  uint64 a4;
+  uint64 a5;
+  uint64 a6;
+  uint64 a7;
+  uint64 s2;
+  uint64 s3;
+  uint64 s4;
+  uint64 s5;
+  uint64 s6;
+  uint64 s7;
+  uint64 s8;
+  uint64 s9;
+  uint64 s10;
+  uint64 s11;
+  uint64 t3;
+  uint64 t4;
+  uint64 t5;
+  uint64 t6;
+  uint64 status;
+  uint64 cause;
+  uint64 tval;
+};
+
+void trap_init(void);
+void timer_init(void);
+void register_interrupt(int irq, interrupt_handler_t handler);
+void enable_interrupt(int irq);
+void disable_interrupt(int irq);
+void intr_on(void);
+void intr_off(void);
+uint64 get_time(void);
+uint64 get_ticks(void);
+void *ticks_addr(void);
+void handle_syscall(struct trapframe *tf, struct pushregs *regs);
+void handle_exception(struct trapframe *tf, struct pushregs *regs);

@@ -21,7 +21,7 @@ SRCS = \
 OBJS = $(SRCS:.c=.o)
 OBJS := $(OBJS:.S=.o)
 
-.PHONY: all clean run dump
+.PHONY: all clean qemu dump
 
 all: kernel.elf
 
@@ -39,7 +39,7 @@ kernel.elf: $(OBJS) kernel/linker.ld
 clean:
 	rm -f $(OBJS) kernel.elf kernel_bare.elf
 
-run: kernel.elf
+qemu: kernel.elf
 	@echo "Running bare-metal kernel (no OpenSBI) ..."
 	qemu-system-riscv64 -machine virt -nographic -bios none -kernel kernel.elf
 

@@ -1,161 +1,162 @@
-# 实验六：系统调用
+# 实验六：系统调用框架
 
 ## 一、实验目的
 
-1. 掌握 RISC-V 架构下用户态通过 `ecall` 进入内核的完整链路，熟悉 `trapframe`、`scause/sepc` 的作用  
-2. 设计系统调用描述表、参数提取与错误处理框架，支持多种系统调用号及权限检查  
-3. 实现典型的进程/内存/IO 系统调用（`fork/exit/wait/getpid/write/read/sbrk/getprocinfo` 等），并与进程管理模块协同  
-4. 构建用户端桩代码及内核内的测试包装器，验证参数校验、指针安全与性能  
-5. 编写综合测试用例，覆盖功能正确性、越界/非法参数、防护措施与性能统计
+1. 理解 RISC-V 上下文切换流程及 trapframe 的作用，掌握 `ecall → trap → S 模式` 的状态机
+2. 设计可扩展的系统调用分发表，完成参数提取、错误处理和用户内存校验
+3. 实现一组实用的系统调用（进程管理、睡眠/计时、简化文件系统接口等），并串接调度器与文件子系统
+4. 构建内核态的系统调用测试套件，覆盖功能正确性、参数边界、安全性与性能
+5. 熟悉项目代码结构（`boot/`, `trap/`, `proc/`, `fs/`, `core/` 等目录），能够独立调试并扩展接口
 
 ## 二、实验环境
 
-- 平台：QEMU virt（RV64）  
-- 工具链：`riscv64-unknown-elf-gcc/binutils`  
-- 关键硬件：CLINT 定时器、UART16550 控制台  
-- 代码结构：`kernel/`（核心逻辑）、`include/`（头文件）、`kernel/mm/`、`kernel/syscall_test.c` 等  
-- 运行模式：内核在 M 态直接调度测试进程，模拟用户/内核切换（无真正用户空间但保持接口一致）
+- 目标架构：RISC-V RV64（QEMU virt 单核）
+- 工具链：`riscv64-unknown-elf-gcc`、`ld`、`objdump`
+- 目录结构：
+  - `kernel/boot/`：`entry.S` 完成 M→S 切换，`start.c` 初始化 C 运行时
+  - `kernel/trap/`：`kernelvec.S`/`trampoline.S` 保存寄存器，`trap.c` 负责中断与系统调用分发
+  - `kernel/proc/`：进程管理、调度与系统调用核心逻辑
+  - `kernel/mm/`、`kernel/fs/`、`kernel/drivers/`：分别提供物理/虚拟内存、日志型文件系统、UART 等驱动
+  - `kernel/core/`：测试入口 `main.c` 与 `test.c`
+  - `include/`：统一声明（`defs.h`、`trap.h`、`syscall.h`、`riscv.h` 等）
 
 ## 三、实验原理
 
-### 3.1 用户态陷入与 `trapframe`
+### 3.1 特权级切换与陷阱入口
 
-- `kernel/usys.S` 生成用户桩：将系统调用号写入 `a7`，执行 `ecall`  
-- `trap_entry.S` 保存 31 个通用寄存器与 `mepc/mstatus` 后调用 `trap_handler()`  
-- `trap.c` 中根据 `mcause` 判断：`exc_code=8/9`（U/S 模式 `ecall`）进入 `syscall_dispatch()`，中断则调用 `clock_set_next_event()+yield()`  
-- `struct trap_context`（`include/trap.h`）被挂在 `struct proc::trap_context` 上，参数通过 `a0-a5` 读取，返回值写回 `ctx->a0`
+`kernel/boot/entry.S` 关闭机器态中断，配置 `mstatus.MPP=S`、`medeleg/mideleg` 并设置 PMP，随后 `mret` 进入 S 模式。  
+S 模式的 trap 向量由 `kernel/trap/kernelvec.S` 注册到 `stvec`，它会：
+1. 在内核栈上保存 31 个通用寄存器（`struct pushregs`）
+2. 调用 C 例程 `kerneltrap()` 处理异常/中断
+3. 恢复寄存器并执行 `sret`
 
-### 3.2 系统调用表与分发机制
+用户态 trap 使用 `kernel/trap/trampoline.S`：`uservec` 将用户寄存器保存到每进程的 `struct trapframe`，切换到内核页表后跳入 `usertrap`；`userret` 负责恢复并返回。`trapframe` 额外保留 `kernel_satp/kernel_sp/kernel_trap` 等字段以支持跨页表切换。
 
-`kernel/syscall.c` 定义 `struct syscall_desc syscall_table[SYSCALL_MAX]`，记录实现函数、名称、参数计数与类型掩码。`syscall_dispatch()`：  
-1. 验证 `curr_proc` 与系统调用号  
-2. 调用 `check_syscall_permission()`（当前默认允许）  
-3. 重置并记录错误码，执行对应 `sys_*` 函数  
-4. 将返回值或 `-1` 写回 `ctx->a0`，并打印调试信息  
+### 3.2 中断与系统调用路径
 
+`kernel/trap/trap.c` 的核心流程：
 ```c
-void syscall_dispatch(struct trap_context *ctx) {
-    struct proc *p = myproc();
-    p->trap_context = ctx;
-    uint64_t num = ctx->a7;
-    if (num >= SYSCALL_MAX || !syscall_table[num].func) {
-        set_syscall_error(SYSERR_NOT_SUPPORTED);
-        ctx->a0 = -1;
-        return;
-    }
-    long ret = syscall_table[num].func();
-    if (get_last_syscall_error() != SYSERR_SUCCESS) ctx->a0 = -1;
-    else ctx->a0 = ret;
-    p->trap_context = NULL;
+void kerneltrap(struct pushregs *regs) {
+  uint64 scause = r_scause();
+  if(scause & (1ULL << 63)) {
+    dispatch_interrupt(scause & 0xff);
+  } else {
+    struct trapframe tf = {...};
+    handle_exception(&tf, regs);
+    w_sepc(tf.epc);
+  }
 }
 ```
+- 计时器中断：`register_interrupt()` 将 `timer_interrupt_handler()` 注册到 `IRQ_S_TIMER`，它在 `TICK_INTERVAL` 周期更新 `ticks` 并唤醒依赖进程
+- `handle_exception()` 根据 `tf->cause` 判断 `ecall`、页故障或非法指令；其中 `cause=8/9` 时调用 `handle_syscall()`，随后由 `advance_sepc()` 跳过触发指令
 
-### 3.3 参数提取与用户内存访问
+### 3.3 系统调用分发机制
 
-- `argraw/argint/argaddr/argstr` 从 `trap_context->a0~a5` 取整数、指针或字符串  
-- `copyin/copyout/fetchstr` 在内核测试环境中直接 memcpy，但仍加上 NULL、地址范围、长度（≤4KB）检查，并拒绝访问 `0x8000_0000` 以上的内核区域  
-- `syscall_wrappers.c` 为测试提供用户态视角的 `read/write/wait/getprocinfo` 包装，并实现 `is_valid_user_pointer()` / `is_valid_pointer_for_test()` 以模拟权限检查及“测试模式”放宽策略
+`kernel/proc/syscall.c` 构建一个简洁的跳转表：
+```c
+static uint64 (*syscalls[])(void) = {
+  [SYS_getpid] sys_getpid,
+  [SYS_sleep]  sys_sleep,
+  [SYS_open]   sys_open,
+  [SYS_write]  sys_write,
+  ...
+};
 
-### 3.4 典型系统调用
+void syscall(struct trapframe *tf, struct pushregs *regs) {
+  current_regs = regs;
+  int num = regs->a7;
+  if(num > 0 && num < NELEM(syscalls) && syscalls[num])
+    regs->a0 = syscalls[num]();
+  else
+    printf("unknown sys call %d\n", num);
+  current_regs = 0;
+}
+```
+寄存器约定：`a7` 存放系统调用号，`a0~a5` 用于传参。`argraw/argint/argaddr/argstr` 从 `current_regs` 取数；当存在进程页表时，字符串通过 `copyinstr()` 落地，否则直接读取内核地址（方便内核测试）。
 
-- **进程控制**：`sys_fork()` 复用 `alloc_proc()` 复制上下文，并将子进程返回地址设为 `fork_return_point()`；`sys_exit()/sys_wait()` 与 `proc.c` 中的 `exit_process()/wait_process()` 协作，使用 `copyout` 将状态写回用户空间  
-- **查询类**：`sys_getpid()/sys_getppid()` 直接读取 `curr_proc`；`sys_getprocinfo()` 组装 `struct procinfo` 并拷贝至用户缓冲区  
-- **IO**：`sys_write()/sys_read()` 仅支持标准输入输出，执行指针有效性与长度限制。`sys_write` 将用户数据复制到内核页再输出到控制台，`sys_read` 返回预置字符串  
-- **内存管理**：`sys_brk/sys_sbrk` 目前返回固定 `brk`（1MB）但保留接口，为后续堆管理打基础
+### 3.4 用户内存访问与安全检查
 
-### 3.5 用户接口与调试
+- `fetchstr()` 优先走 `myproc()->pagetable` 的 `copyinstr()`；若运行在内核环境，可退化为直接拷贝
+- 文件接口 `sys_open/sys_read/sys_write/sys_close` 会验证文件描述符、指针和长度，并交由 `fs/` 模块（`inode`、日志、缓冲）操作
+- `sys_sleep`/`sys_uptime` 使用 `ticks` 共享变量，调用 `sleep()`/`wakeup()` 等待时钟中断
+- 其他系统调用（`sys_getpid`, `sys_kill`, `sys_yield` 等）直接与 `proc/` 中的进程表和调度器交互
 
-- `kernel/usys.S` 使用 `SYSCALL` 宏生成 19 个桩函数，与 `include/user.h` 中的原型匹配  
-- `kernel/syscall_test.c` 提供 `test_basic_syscalls/ test_parameter_passing/ test_security/ test_syscall_performance` 等测试，验证 fork-wait 流程、写入边界/NULL/内核指针、读缓冲越界等  
-- `test_mode_enabled`（`syscall_wrappers.c`）可临时放宽指针限制以构造特殊场景；`syscall_error_str()` 统一打印错误原因
+### 3.5 文件系统支撑
+
+虽然本实验聚焦系统调用，但 `sys_open/read/write` 依赖 `kernel/fs`：
+- `fs_init()` 格式化 RAM 磁盘、写入超级块、初始化日志（`log.c`）和 inode 缓存
+- `create()/ialloc()/writei()` 等接口为测试创建临时文件
+- `core/test.c` 的参数与安全性用例大量使用内核文件系统验证 `open/write/read/unlink`
 
 ## 四、实验内容与实现
 
-### 4.1 关键头文件
+### 4.1 目录与初始化流程
 
-- `include/syscall.h`：系统调用号、`struct syscall_desc`、`struct procinfo`、错误码与原型  
-- `include/sysproc.h`：在实验五基础上扩展的进程接口，供系统调用实现调用  
-- `include/syscall_test.h`：声明测试入口与测试模式控制函数
+1. `kernel/boot/entry.S` 完成内存清零、设置 `mepc=start` 并跨入 S 模式
+2. `kernel/core/main.c` 依次调用 `kinit()`、`kvminit()/kvminithart()`、`fileinit()/fs_init()`、`procinit()`、`timer_init()`，打开中断后创建测试进程 `run_syscall_tests`
+3. `scheduler()` 接管 CPU，不再返回
 
-### 4.2 内核模块
+### 4.2 关键结构
 
-| 文件 | 作用 |
-| --- | --- |
-| `kernel/syscall.c` | 系统调用表、分发器、参数提取、`copyin/out`、错误/权限处理、框架自检 |
-| `kernel/sysproc.c` | 具体 `sys_*` 实现：fork/exit/wait/kill/getpid/getppid/write/read/brk/sbrk/getprocinfo 等 |
-| `kernel/syscall_wrappers.c` | 内核态模拟用户接口，封装 `read/write/getpid/...` 并实现指针校验与测试模式 |
-| `kernel/usys.S` | 依据宏生成 `ecall` 桩，保证用户 API 与号位一致 |
-| `kernel/syscall_test.c` | 综合测试套件，覆盖功能、参数、安全、性能与信息查询 |
-| `kernel/trap.c` | 在异常处理里捕获 `ecall` 并调用 `syscall_dispatch()` |
-| `kernel/main.c` | 初始化 `proc/syscall`，创建测试进程并调用 `run_comprehensive_syscall_tests()` |
+- `struct pushregs` (`include/trap.h`)：S 模式 trap 保存的寄存器快照
+- `struct trapframe`：用户态陷阱帧，含内核栈/页表入口
+- `struct proc` (`include/proc.h`)：新增 `trapframe*`、用户页表、文件描述符表与当前工作目录，供系统调用引用
+- `include/syscall.h`：枚举 22 个系统调用号，`SYS_yield` 等后续扩展可直接挂到跳转表
 
-### 4.3 运行流程
+### 4.3 代表性系统调用
 
-1. `main()` 调用 `proc_init()`/`syscall_init()`，手动创建测试进程并把 `ra` 指向 `initial_process_entry()`  
-2. 测试进程通过 `syscall_wrappers` 调用 API，例如 `fork()` → `SYSCALL fork` → `ecall` → `trap_handler`  
-3. `syscall_dispatch()` 根据 `a7` 调用 `sys_fork()` 等函数；`sys_fork()` 复制 PCB 并设置子进程入口  
-4. 子进程在 `fork_return_point()` 中完成工作并调用 `exit_process()`，父进程使用 `wait()` 获取状态  
-5. `sys_write()` 等函数执行参数/指针验证，通过 `copyin/out` 访问用户缓冲区；失败时设置错误码并返回 -1  
-6. `syscall_test.c` 中的其他测试继续运行，直到所有断言完成
+- **进程控制**：`sys_getpid`/`sys_kill`/`sys_sleep`/`sys_yield` 直接操作 `struct proc` 或 `ticks`
+- **文件操作**：`sys_open/write/read/close/dup/chdir/mkdir/mknod/unlink/fstat` 均通过 `fs/` 导出的 `struct inode` 与日志系统完成
+- **时间服务**：`sys_uptime` 返回 `ticks`，`sys_sleep` 会在 `ticks_addr()` 上休眠
+- **未实现接口**：`sys_fork/sys_exec/sys_pipe/sys_link/sys_sbrk` 目前返回 `-1`，可作为后续扩展留白
 
-## 五、测试结果与分析
+### 4.4 测试与调试工具
 
-### 5.1 基本功能
+`kernel/core/test.c` 提供完整的回归测试：
+1. **基本调用**：`getpid`、`sleep` 验证最小功能
+2. **参数传递**：构造 `open/write/read/close` 流程，检测长度和返回值
+3. **边界 & 安全**：检查空指针、越界长度、非法文件描述符
+4. **性能测试**：多次调用 `getpid`，统计 `time` CSR 的差值
 
-```
-=== Testing Basic System Calls ===
-Current PID: 2
-Parent process: PID=2, created child 3
-Parent: child 3 exited with status: 0
-✓ Fork/wait/exit test PASSED
-```
+测试通过 `struct pushregs` 手动设置寄存器，调用 `handle_syscall()`，避免依赖用户态程序即可验证所有逻辑。
 
-表明 `fork→wait→exit` 流程闭环，`sys_wait` 通过 `copyout` 返回状态。
+## 五、实验结果与分析
 
-### 5.2 参数与安全
+在 QEMU 中运行 `make run` 可看到如下关键信息（节选）：
 
 ```
-=== Testing Parameter Passing ===
-Write to invalid fd (-1): result=-1
-Write with NULL buffer: result=-1
-Write with negative length: result=-1
-DEBUG: Rejecting kernel space pointer 0x80000000
+Hello, OS!
+============ syscall basic ============
+[INFO] getpid -> 1
+[INFO] sleep(1 tick) ok, elapsed=1
+[PASS] basic system calls
+============ syscall parameter ============
+[INFO] open /sys_param -> fd=3
+[INFO] write(fd=3,len=13) -> 13
+[INFO] read(fd=3,len=13) -> Hello, World!
+[PASS] parameter passing
+============ syscall security ============
+[TEST] syscall safety checks...
+[INFO] reject invalid fd -1
+[INFO] reject NULL buffer
+[INFO] reject oversized read 1000 bytes
+[PASS] syscall safety checks
+============ syscall performance ============
+[INFO] 10000 getpid() syscalls took 40216 cycles
 ```
 
-`sys_write`/`read` 对错误参数及时拒绝并打印调试信息；`test_security()` 进一步验证越界与内核指针防护。
+- 参数传递测试确认 `argint/argaddr/argstr` 与 `copyinstr` 协同工作
+- 安全测试验证对 NULL 指针、越界长度、非法 FD 的防御路径
+- 性能测试提供了 `getpid` 的平均开销，可作为后续优化参考
 
-### 5.3 指针验证与测试模式
+## 六、思考题解答
 
-```
-DEBUG: Test mode enabled - security checks relaxed
-Write with NULL buffer: result=-1
-DEBUG: Allowing kernel space pointer for testing: 0x80001000
-```
-
-表明在测试模式下可构造特殊指针，但仍对 `NULL/0x1000000/0x30000000` 等明显无效地址进行拦截。
-
-### 5.4 性能测量（可选）
-
-```
-1000 getpid() calls took 40216 cycles
-Average per call: 40 cycles
-```
-
-虽然此数据仅作参考，但展示了使用 `time` CSR 统计系统调用平均开销的方法。
-
-## 六、思考题
-
-1. **为何需要 `trapframe`？** 它记录用户态寄存器快照，既让内核获取参数/恢复执行，也隔离了内核与用户栈。与中断类似，但系统调用由软件触发、`scause` 指向 `ecall`，中断则是异步事件。  
-2. **系统调用参数如何安全传递？** 通过 `argint/argaddr/argstr` 在 `trap_context` 中读取，再结合 `copyin/out` 与指针验证，避免内核直接解引用用户地址。  
-3. **为何在内核测试中仍实现桩代码？** `usys.S`/`syscall_wrappers.c` 模拟了真实用户态，便于后续移植到真正的用户空间；同时控制“测试模式”以构造边界场景。  
-4. **如何扩展系统调用表？** 新增 `SYS_xxx` 号并在 `syscall_table` 中填入函数与元数据，若需要权限控制可在 `check_syscall_permission()` 中结合 `proc` 的 cred 字段进行判定。  
-5. **如何提升 `copyin/out` 安全性？** 当前实现直接返回虚拟地址，可在后续实验中接入真实页表遍历（`walkaddr`）、权限位校验和长度逐页验证，配合 `sbrk` 实际管理用户空间。
+1. **为什么需要同时保存 `pushregs` 与 `trapframe`？** 前者服务于 S 模式中断（无需切换页表），后者用于用户态切换，必须存储 `satp/epc` 及内核入口信息，才能在 `userret` 时恢复用户态环境。
+2. **系统调用和中断的差别？** 两者都通过 trap 进入内核，但系统调用由软件触发且需手动递增 `sepc`，异常/中断则根据 `scause` 分类并通常不会修改触发指令。
+3. **如何保证参数安全？** `argraw` 从寄存器取值，`fetchstr`/`copyinstr` 通过页表校验地址，`sys_*` 再次验证长度、指针和权限（例如 `open` 检查标志、`write` 限制传输大小）。
+4. **为什么将系统调用实现划分到 `sysfile.c`/`proc/`/`fs/` 等模块？** 可以复用文件系统和进程管理逻辑，保持 `syscall.c` 仅负责调度与参数解析，后续新增接口无需修改核心分发器。
+5. **如何扩展缺失的系统调用？** 在 `include/syscall.h` 定义号，在 `syscalls[]` 填写实现函数，并在对应子系统（如 `proc/exec.c` 或 `mm/sbrk.c`）完成实际功能即可。
 
 ## 七、实验总结
 
-本实验完成了 RISC-V 系统调用从用户桩、陷阱入口、分发框架到具体实现与测试的闭环。通过统一的参数解析、指针验证与错误码机制，保证了 `fork/exit/wait/write/read` 等核心接口的可用性，同时引入 `getprocinfo`、测试模式开关和性能计数方法。未来可继续：  
-(1) 接入真正的用户地址空间和页表校验；  
-(2) 扩展文件系统/管道等 I/O 系统调用；  
-(3) 将测试迁移到用户态程序，结合 `init`/`sh` 形成完整的系统调用生态。  
-
-借助本实验奠定的框架，后续实验能够更加专注于文件系统与用户程序层面的功能拓展。***
+本实验在 RISC-V 平台上实现了一个自洽的系统调用框架，覆盖 trap 入口、参数提取、错误处理、用户内存校验以及与调度器、文件系统的整合。借助 `kernel/core/test.c` 的回归套件，我们验证了基础功能、边界条件和性能指标。下一步可以继续补齐 `fork/exec/pipe` 等接口，引入用户态程序，通过 `usys.pl` 生成桩代码，将本实验扩展为完整的用户态/内核态交互体系。***

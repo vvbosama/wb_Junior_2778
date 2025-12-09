@@ -1,74 +1,101 @@
-// kernel/proc.h - 确保包含以下内容
-#ifndef _PROC_H_
-#define _PROC_H_
+#pragma once
 
-#include "types.h"
-#include "mm.h"
-#include "trap.h"  // 添加这行
+#include "riscv.h"
+
+struct file;
+struct inode;
 
 #define NPROC 32
-#define STACK_SIZE 4096
+#define NCPU  1
+#define NOFILE 16
 
-// 进程状态
 enum procstate {
-    UNUSED = 0,
-    USED,
-    RUNNABLE,
-    RUNNING,
-    SLEEPING,
-    ZOMBIE
+  UNUSED = 0,
+  USED,
+  SLEEPING,
+  RUNNABLE,
+  RUNNING,
+  ZOMBIE
 };
 
-// 上下文结构
 struct context {
-    uint64_t ra;
-    uint64_t sp;
-    uint64_t s0;
-    uint64_t s1;
-    uint64_t s2;
-    uint64_t s3;
-    uint64_t s4;
-    uint64_t s5;
-    uint64_t s6;
-    uint64_t s7;
-    uint64_t s8;
-    uint64_t s9;
-    uint64_t s10;
-    uint64_t s11;
+  uint64 ra;
+  uint64 sp;
+  uint64 s0;
+  uint64 s1;
+  uint64 s2;
+  uint64 s3;
+  uint64 s4;
+  uint64 s5;
+  uint64 s6;
+  uint64 s7;
+  uint64 s8;
+  uint64 s9;
+  uint64 s10;
+  uint64 s11;
 };
 
-// 进程结构体
+struct proc;
+
+struct cpu {
+  struct proc *proc;
+  struct context context;
+  int noff;
+  int intena;
+};
+
+struct kthread_info {
+  void (*start)(void *);
+  void *arg;
+};
+
 struct proc {
-    enum procstate state;
-    int pid;
-    struct context context;
-    uint64_t kstack;
-    pagetable_t pagetable;
-    struct proc *parent;
-    void *chan;
-    int killed;
-    int xstate;
-    char name[16];
-    struct trap_context *trap_context; // 添加陷阱上下文指针
-    uint64_t sz;                       // 进程大小
+  struct spinlock lock;
+  enum procstate state;
+  void *chan;
+  int killed;
+  int xstate;
+  int pid;
+
+  uint64 kstack;
+  uint64 sz;
+  pagetable_t pagetable;
+  struct trapframe *trapframe;
+  struct context context;
+  struct proc *parent;
+  char name[16];
+  struct file *ofile[NOFILE];
+  struct inode *cwd;
+
+  struct kthread_info kthread;
 };
 
-// 系统调用
-extern struct proc proc[NPROC];
-extern struct proc *curr_proc;
-extern volatile int proc_lock;
+extern struct proc proc[];
 
-// 函数声明
-void spin_lock(volatile int *lock);
-void spin_unlock(volatile int *lock);
-void proc_init(void);
-struct proc* alloc_proc(void);
-int create_process(void (*entry)(void));
-void exit_process(int status);
-int wait_process(int *status);
-void scheduler(void);
+void procinit(void);
+void scheduler(void) __attribute__((noreturn));
+void sched(void);
 void yield(void);
-void sleep(void *chan);
+void sleep(void *chan, struct spinlock *lk);
 void wakeup(void *chan);
+int kill(int pid);
+struct proc *myproc(void);
+struct cpu *mycpu(void);
 
-#endif
+struct proc *alloc_process(void);
+int create_process(const char *name, void (*fn)(void *), void *arg);
+void exit_process(int status) __attribute__((noreturn));
+int wait_process(int *status);
+
+uint64 sys_getpid(void);
+uint64 sys_yield(void);
+uint64 sys_kill(void);
+uint64 sys_wait(void);
+uint64 sys_exit(void) __attribute__((noreturn));
+uint64 sys_sleep(void);
+uint64 sys_uptime(void);
+
+void push_off(void);
+void pop_off(void);
+
+void swtch(struct context *old, struct context *new);

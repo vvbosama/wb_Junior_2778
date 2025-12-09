@@ -3,38 +3,37 @@ ENTRY(_entry)
 
 SECTIONS
 {
-  . = 0x80000000;
+  . = 0x80000000; /* 内核链接/加载地址 */
 
   .text : {
+    *(.text.entry)         /* 放置入口标签 _entry 所在段 */
     *(.text .text.*)
+    . = ALIGN(0x1000);
     PROVIDE(etext = .);
   }
 
   .rodata : {
-    *(.rodata .rodata.*)
+    . = ALIGN(16);
     *(.srodata .srodata.*)
+    . = ALIGN(16);
+    *(.rodata .rodata.*)
   }
 
   .data : {
-    *(.data .data.*)
+    . = ALIGN(16);
     *(.sdata .sdata.*)
+    . = ALIGN(16);
+    *(.data .data.*)
   }
 
   .bss : {
     . = ALIGN(16);
-    _bss_start = .;
-    *(.bss .bss.*)
     *(.sbss .sbss.*)
     . = ALIGN(16);
-    _bss_end = .;
+    *(.bss .bss.*)
   }
 
   PROVIDE(end = .);
-  PROVIDE(kernel_base = 0x80000000);  /* 添加这行 */
-
-  .stack : {
-    . = ALIGN(16);
-    stack0 = .;
-    . += 4096;
-  }
 }
+
+

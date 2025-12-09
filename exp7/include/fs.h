@@ -1,136 +1,176 @@
-// kernel/fs.h - 文件系统结构定义
-#ifndef _FS_H_
-#define _FS_H_
+#pragma once
 
-#include "types.h"
-#include "proc.h"
+#include "riscv.h"
 
-// 文件系统常量
-#define BSIZE           4096        // 块大小：4KB
-#define BSIZE_SHIFT     12          // 块大小位移
-#define NDIRECT         12          // 直接块数量
-#define NINDIRECT       (BSIZE / sizeof(uint32_t))  // 间接块可索引的块数
-#define MAXFILE         (NDIRECT + NINDIRECT)       // 最大文件块数
-#define MAXOPBLOCKS     10          // 最大操作块数
-#define LOGSIZE         (MAXOPBLOCKS * 3)  // 日志大小
-#define FSSIZE          2000        // 文件系统大小（块数）
+#define BSIZE      1024            /* block size in bytes */
+#define FSSIZE     1024            /* total blocks in ramdisk */
+#define LOGSIZE    30              /* max log blocks */
+#define NINODE     64              /* number of in-memory inodes */
+#define NFILE      40              /* open files */
+#define NBUF       32              /* buffer cache entries */
 
-// 超级块位置
-#define SUPERBLOCK_NUM  1           // 超级块在块1（块0是引导块）
+#define ROOTINO    1               /* root i-number */
+#define DIRSIZ     14
 
-// 文件系统魔数
-#define FS_MAGIC        0x10203040
+/* On-disk layout */
+// [boot block][super block][log][inode blocks][free bitmap][data blocks]
 
-// 文件类型
-#define T_DIR            1          // 目录
-#define T_FILE           2          // 文件
-#define T_DEVICE         3          // 设备
-
-// 目录项大小
-#define DIRSIZ           14          // 目录项中文件名最大长度
-
-// 超级块结构
 struct superblock {
-    uint32_t magic;        // 文件系统魔数
-    uint32_t size;         // 文件系统大小（块数）
-    uint32_t nblocks;      // 数据块数量
-    uint32_t ninodes;      // inode数量
-    uint32_t nlog;         // 日志块数量
-    uint32_t logstart;     // 日志起始块号
-    uint32_t inodestart;   // inode区起始块号
-    uint32_t bmapstart;    // 位图起始块号
+  uint magic;       /* must be FSMAGIC */
+  uint size;        /* total blocks */
+  uint nblocks;     /* data blocks */
+  uint ninodes;     /* total inodes */
+  uint nlog;        /* log blocks */
+  uint logstart;    /* log start block */
+  uint inodestart;  /* inode blocks start */
+  uint bmapstart;   /* bitmap start block */
+  uint datastart;   /* data region start block */
 };
 
-// 磁盘inode结构
+#define FSMAGIC 0x10203040
+
+/* On-disk inode structure */
+#define NDIRECT 12
+#define NINDIRECT (BSIZE / sizeof(uint))
+#define MAXOPBLOCKS 10
+#define MAXFILE (NDIRECT + NINDIRECT)
+
 struct dinode {
-    uint16_t type;         // 文件类型
-    uint16_t major;        // 主设备号（T_DEVICE）
-    uint16_t minor;        // 次设备号（T_DEVICE）
-    uint16_t nlink;        // 硬链接计数
-    uint32_t size;         // 文件大小（字节）
-    uint32_t addrs[NDIRECT+1]; // 数据块地址
-    uint64_t ctime;        // 创建时间戳
+  short type;
+  short major;
+  short minor;
+  short nlink;
+  uint size;
+  uint addrs[NDIRECT+1];
 };
 
-// 内存inode结构
-struct inode {
-    uint32_t dev;          // 设备号
-    uint32_t inum;         // inode号
-    int ref;               // 引用计数
-    volatile int lock;     // 保护inode内容的锁
-    int valid;             // inode已从磁盘读取？
-    
-    // 从磁盘拷贝的内容
-    uint16_t type;
-    uint16_t major;
-    uint16_t minor;
-    uint16_t nlink;
-    uint32_t size;
-    uint32_t addrs[NDIRECT+1];
-    uint64_t ctime;
-};
+/* Inode types */
+#define T_DIR  1
+#define T_FILE 2
+#define T_DEV  3
 
-// 目录项结构
+/* Directory entry */
 struct dirent {
-    uint16_t inum;         // inode号，0表示空闲
-    char name[DIRSIZ];     // 文件名
+  ushort inum;
+  char name[DIRSIZ];
 };
 
-// 文件结构
+struct buf {
+  int valid;
+  int disk;       /* does disk "own" buf? */
+  uint dev;
+  uint blockno;
+  struct buf *prev;
+  struct buf *next;
+  struct spinlock lock;
+  int refcnt;
+  uchar data[BSIZE];
+};
+
+struct inode {
+  struct spinlock lock;
+  int dev;
+  int inum;
+  int ref;
+  int valid;
+
+  short type;
+  short major;
+  short minor;
+  short nlink;
+  uint size;
+  uint addrs[NDIRECT+1];
+};
+
+enum filetype {
+  FD_NONE,
+  FD_INODE,
+};
+
 struct file {
-    enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE } type;
-    int ref;               // 引用计数
-    char readable;
-    char writable;
-    struct inode *ip;      // FD_INODE和FD_DEVICE
-    uint32_t off;          // FD_INODE
-    short major;            // FD_DEVICE
+  enum filetype type;
+  int ref;
+  char readable;
+  char writable;
+  struct inode *ip;
+  uint off;
 };
 
-// 统计信息结构（用于filestat）
-struct stat {
-    int dev;     // 设备号
-    uint32_t ino; // inode号
-    short type;   // 文件类型
-    short nlink;  // 硬链接数
-    uint64_t size; // 文件大小
+/* Helper macros */
+#define IPB           (BSIZE / sizeof(struct dinode))
+#define BPB           (BSIZE * 8)
+#define IBLOCK(i, sb)     ((i) / IPB + (sb).inodestart)
+#define BBLOCK(lbn, sb)   ((lbn) / BPB + (sb).bmapstart)
+
+/* Filesystem interface */
+void fs_init(void);
+void begin_op(void);
+void end_op(void);
+void fs_test_samples(void);
+void fs_force_recovery(void);
+
+/* inode/file helpers exposed for tests */
+int fs_write_file(const char *path, const char *data, int len);
+int fs_read_file(const char *path, char *dst, int max);
+int fs_delete_file(const char *path);
+int fs_file_size(const char *path);
+
+/* buffer cache */
+void binit(void);
+struct buf* bread(uint dev, uint blockno);
+void bwrite(struct buf *b);
+void brelse(struct buf *b);
+void bpin(struct buf *b);
+void bunpin(struct buf *b);
+
+/* log */
+void log_init(int dev, struct superblock *sb);
+void log_write(struct buf *b);
+void log_force_recover(void);
+
+/* file table */
+void fileinit(void);
+struct file* filealloc(void);
+struct file* filedup(struct file *f);
+void fileclose(struct file *f);
+int fileread(struct file *f, char *addr, int n);
+int filewrite(struct file *f, char *addr, int n);
+
+struct fs_usage_stats {
+  uint total_blocks;
+  uint data_blocks;
+  uint free_blocks;
+  uint total_inodes;
+  uint free_inodes;
 };
 
-#define NINODE 50  // 内存中缓存的inode数量
-#define ROOTDEV 1  // 根设备号
-#define NDEV 10    // 最大设备号
+struct fs_cache_counters {
+  uint buffer_cache_hits;
+  uint buffer_cache_misses;
+  uint disk_read_count;
+  uint disk_write_count;
+};
 
-// 全局变量声明
-extern struct superblock sb;  // 超级块
+struct fs_inode_usage {
+  int inum;
+  int ref;
+  short type;
+  uint size;
+};
 
-// 文件系统函数声明
-void fsinit(int dev);
-void readsb(int dev, struct superblock *sb);
-struct inode* dirlookup(struct inode *dp, char *name, uint32_t *poff);
-int dirlink(struct inode *dp, char *name, uint32_t inum);
+int fs_get_usage_stats(struct fs_usage_stats *stats);
+void fs_get_cache_counters(struct fs_cache_counters *counters);
+int fs_collect_inode_usage(struct fs_inode_usage *entries, int max_entries);
+
+/* inode helpers */
 struct inode* namei(char *path);
-struct inode* nameiparent(char *path, char *name);
-struct inode* iget(uint32_t dev, uint32_t inum);
+void ilock(struct inode *ip);
+void iunlock(struct inode *ip);
+void iupdate(struct inode *ip);
 void iput(struct inode *ip);
 void iunlockput(struct inode *ip);
-struct inode* ialloc(uint32_t dev, uint16_t type);
-void iupdate(struct inode *ip);
-void itrunc(struct inode *ip);
-void stati(struct inode *ip, struct stat *st);
-int readi(struct inode *ip, int user_dst, uint64_t dst, uint32_t off, uint32_t n);
-int writei(struct inode *ip, int user_src, uint64_t src, uint32_t off, uint32_t n);
-int namecmp(const char *s, const char *t);
-
-// 文件操作函数
-struct file* filealloc(void);
-void fileclose(struct file *f);
-struct file* filedup(struct file *f);
-int fileread(struct file *f, uint64_t addr, int n);
-int filewrite(struct file *f, uint64_t addr, int n);
-int filestat(struct file *f, uint64_t addr);
-
-
-extern void fs_reset_allocator(void);  // 添加重置函数声明
-
-#endif // _FS_H_
-
+struct inode* ialloc(uint dev, short type);
+int readi(struct inode *ip, uint64 dst, uint off, uint n);
+int writei(struct inode *ip, uint64 src, uint off, uint n);
+int dirlink(struct inode *dp, const char *name, uint inum);
+int dirlookup(struct inode *dp, const char *name, uint *poff);

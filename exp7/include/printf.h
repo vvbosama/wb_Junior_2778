@@ -1,7 +1,5 @@
-#ifndef _PRINTF_H_
-#define _PRINTF_H_
+#pragma once
 
-int printf(const char *fmt, ...);
-void printf_color(int color, const char *fmt, ...);
+void print_number(long long x, int base, int sign);
+void print_hex64(unsigned long long x);
 
-#endif // _PRINTF_H_

@@ -1,14 +1,11 @@
-#ifndef KERNEL_STRING_H
-#define KERNEL_STRING_H
+#pragma once
 
-#include <stddef.h> /* size_t */
+#include <stdint.h>
 
-void *memset(void *s, int c, size_t n);
-void *memcpy(void *dest, const void *src, size_t n);
-int memcmp(const void *a, const void *b, size_t n);
-
-size_t strlen(const char *s);
-char *strcpy(char *dst, const char *src);
-int strcmp(const char *a, const char *b);
-
-#endif /* KERNEL_STRING_H */
+void *memset(void *dst, int c, unsigned n);
+void *memmove(void *dst, const void *src, unsigned n);
+void *memcpy(void *dst, const void *src, unsigned n);
+unsigned strlcpy(char *dst, const char *src, int n);
+int strncmp(const char *s1, const char *s2, unsigned n);
+char *strncpy(char *dst, const char *src, int n);
+unsigned strlen(const char *s);
